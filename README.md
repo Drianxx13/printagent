@@ -30,6 +30,16 @@ So the design splits the work:
 | **LLM judgement** (`render_proof`) | The assistant *sees* a proof image with cut line and safe zone and checks spelling, contact details and cropped logos | This is what rules can't do. `samples/09_typo_passes_checks.tif` passes every rule and is caught by the model. |
 | **Order gate** (`store.py`) | A draft order requires a passing preflight, for *this* product, on an *unchanged* file (sha256) | Agents act fast. The gate means they can't act sloppily. |
 
+## AI proofreading in the web checker
+
+Rules can't read. The web checker has a **Proofread with AI** button that sends the
+artwork to Claude (vision) and adds what it finds to the same report: typos, wrong-looking
+contact details, cut-off logos, text too small or low-contrast. On the `Hidden typo`
+sample every rule passes and the AI flags "Rotterdma".
+
+To turn it on, copy `.env.example` to `.env` and add your `ANTHROPIC_API_KEY`.
+Without a key everything else works and the button stays off.
+
 ## Same engine, three surfaces
 
 1. **Web upload** (`printagent-web`): drop a file, get a traffic-light report, a proof with the cut line and a one-click fix. Anyone gets it in five seconds.
@@ -54,7 +64,7 @@ So the design splits the work:
 ```bash
 pip install -e ".[dev]"
 python samples/make_samples.py     # 9 test cards, each with a classic mistake
-pytest -q                          # 18 tests
+pytest -q                          # 21 tests (AI calls are mocked)
 python demo.py samples/03_no_bleed.png   # full flow over real MCP stdio
 printagent-web                     # web checker at http://127.0.0.1:8765
 ```

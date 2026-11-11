@@ -137,3 +137,56 @@ def test_web_flow(tmp_path, monkeypatch):
                   files={"file": ("x.exe", b"MZ", "application/octet-stream")}).status_code == 400
     assert c.get(f"/files/{r['job']}/..%2F..%2Fsecret").status_code == 404
     assert c.post("/api/quote", json={"product_id": "business-cards", "quantity": 500}).json()["total_eur"] > 0
+
+
+class _FakeClient:
+    """Stands in for anthropic.Anthropic in tests (no network, no key)."""
+    def __init__(self, reply):
+        self.reply, self.calls = reply, []
+        self.messages = self
+
+    def create(self, **kw):
+        self.calls.append(kw)
+        block = type("B", (), {"type": "text", "text": self.reply})()
+        return type("M", (), {"content": [block]})()
+
+
+def test_ai_review_parses_model_output():
+    from printagent import ai_review
+    reply = ('Here you go: {"issues": [{"kind": "typo", "severity": "error", '
+             '"text": "Rotterdma should be Rotterdam", "suggestion": "Fix the city name"}], '
+             '"transcript": "Bakkerij Moerman ... Rotterdma"}')
+    fake = _FakeClient(reply)
+    r = ai_review.review(SAMPLES / "09_typo_passes_checks.tif", "business-cards", client=fake)
+    assert r["checks"][0]["title"] == "Possible typo" and r["checks"][0]["severity"] == "error"
+    assert "Rotterdma" in r["transcript"]
+    content = fake.calls[0]["messages"][0]["content"]
+    assert content[0]["type"] == "image" and "Business Cards" in content[1]["text"]
+    # garbage from the model never crashes the page
+    assert ai_review.review(SAMPLES / "01_good_card.tif", "business-cards",
+                            client=_FakeClient("sorry, no json"))["checks"] == []
+
+
+def test_web_ai_review(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from printagent import ai_review, web
+    monkeypatch.setattr(web, "WORK", tmp_path / "web")
+    c = TestClient(web.app)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert c.get("/api/config").json() == {"ai_review": False}
+    job = c.post("/api/preflight-sample", json={"name": "09_typo_passes_checks.tif"}).json()["job"]
+    assert c.post("/api/ai-review", json={"job": job, "product_id": "business-cards"}).status_code == 400
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.setattr(ai_review, "review", lambda src, pid: {"model": "m", "checks": [], "transcript": str(src)})
+    r = c.post("/api/ai-review", json={"job": job, "product_id": "business-cards"}).json()
+    assert r["transcript"].endswith("09_typo_passes_checks.tif")
+
+
+def test_dotenv(tmp_path, monkeypatch):
+    from printagent.ai_review import load_dotenv
+    monkeypatch.delenv("PA_TEST_KEY", raising=False)
+    (tmp_path / ".env").write_text('# comment\nPA_TEST_KEY="abc"\n')
+    load_dotenv(tmp_path / ".env")
+    import os
+    assert os.environ["PA_TEST_KEY"] == "abc"

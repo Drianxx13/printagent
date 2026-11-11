@@ -16,7 +16,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
-from . import catalog, pricing
+from . import ai_review, catalog, pricing
 from .fixer import _strip, fix
 from .preflight import render_proof
 
@@ -62,6 +62,35 @@ def _run(job: str, src: Path, product_id: str, label: str) -> dict:
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+
+@app.get("/api/config")
+def config() -> dict:
+    return {"ai_review": ai_review.enabled()}
+
+
+class AIReq(BaseModel):
+    job: str
+    product_id: str
+    view: str = "original"
+
+
+@app.post("/api/ai-review")
+def ai_review_job(req: AIReq) -> dict:
+    if not ai_review.enabled():
+        raise HTTPException(400, "AI review is off. Add ANTHROPIC_API_KEY to the .env file.")
+    d = _job_dir(req.job)
+    if req.view == "fixed":
+        src = next((p for p in d.iterdir() if p.stem.endswith("_print-ready")), None)
+    else:
+        src = next((p for p in d.iterdir() if p.suffix.lower() in ALLOWED
+                    and "_print-ready" not in p.stem and not p.stem.startswith("proof_")), None)
+    if src is None:
+        raise HTTPException(404, "file not found")
+    try:
+        return ai_review.review(src, req.product_id)
+    except Exception as e:  # network, auth, rate limit
+        raise HTTPException(502, f"AI review failed: {e}") from e
 
 
 @app.get("/api/products")
@@ -167,6 +196,7 @@ def files(job: str, name: str) -> FileResponse:
 
 def main() -> None:
     import uvicorn
+    ai_review.load_dotenv(ROOT.parent / ".env")
     port = int(os.environ.get("PRINTAGENT_PORT", 8765))
     url = f"http://127.0.0.1:{port}"
     _cleanup_old_jobs()

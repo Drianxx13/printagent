@@ -88,6 +88,13 @@
   .err { color: var(--err); margin-top: 10px; font-size: 13.5px; }
   .spin { width: 16px; height: 16px; border: 2px solid rgba(255,255,255,.4); border-top-color: #fff; border-radius: 50%; animation: s .7s linear infinite; }
   @keyframes s { to { transform: rotate(360deg); } }
+  .ai { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+  .ai .ic.ai { background: #6b4bd8; }
+  .ai-badge { font-family: var(--mono); font-size: 10.5px; padding: 1px 6px; border-radius: 4px; background: #efedff; color: #5a3fc0; margin-left: 6px; vertical-align: 1px; }
+  .ai details { margin-top: 10px; font-size: 12.5px; color: var(--muted); }
+  .ai details p { white-space: pre-wrap; margin: 6px 0 0; color: #3d3b34; }
+  .btn.ai-btn { background: #5a3fc0; } .btn.ai-btn:hover { background: #4a32a3; }
+  .spin.dark { border-color: #ddd; border-top-color: #5a3fc0; }
   footer { text-align: center; padding: 10px 0 30px; color: var(--muted); font-size: 12px; font-family: var(--mono); }
 </style>
 </head>
@@ -157,7 +164,7 @@ const VERDICT = {
   fail: ["✕", "Can't print this yet"],
 };
 const ICON = { ok: "✓", warning: "!", error: "✕" };
-let products = [], state = null;
+let products = [], state = null, aiEnabled = false;
 
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const pid = () => $("#product").value;
@@ -171,6 +178,7 @@ async function api(url, opts) {
 
 async function init() {
   products = await api("/api/products");
+  aiEnabled = (await api("/api/config")).ai_review;
   $("#product").innerHTML = products.map((p) => `<option value="${p.id}">${esc(p.name)} · ${p.finished_size_mm} mm</option>`).join("");
   $("#product").onchange = () => { renderSpecs(); if (state?.sample) runSample(state.sample); };
   renderSpecs();
@@ -232,7 +240,7 @@ function fail(e) {
 }
 
 function show(r) {
-  state = { ...r, original: r, fixed: null, view: "original" };
+  state = { ...r, original: r, fixed: null, view: "original", ai: {}, aiBusy: false, aiError: null };
   render();
 }
 
@@ -241,13 +249,15 @@ const ready = () => state.fixed?.fixed && state.fixed.after.report.status !== "f
 function render() {
   const cur = state.view === "fixed" ? state.fixed.after : state.original;
   const rep = cur.report;
-  const [icon, title] = VERDICT[rep.status];
+  const aiErr = (state.ai[state.view]?.checks || []).some((c) => c.severity === "error");
+  const status = aiErr && rep.status === "pass" ? "pass_with_warnings" : rep.status;
+  const [icon, title] = VERDICT[status];
   const canFix = !state.fixed && state.original.report.auto_fixable.length > 0;
   const isTypo = state.sample === "09_typo_passes_checks.tif";
   $("#out").innerHTML = `
-    <div class="verdict v-${rep.status}">
+    <div class="verdict v-${status}">
       <div class="dot">${icon}</div>
-      <div><h2>${title}</h2><p>${esc(rep.customer_message)}</p></div>
+      <div><h2>${title}</h2><p>${esc(rep.customer_message)}${aiNote()}</p></div>
     </div>
     <div class="grid2">
       <div>
@@ -258,8 +268,9 @@ function render() {
         <div class="proof"><img src="${cur.proof_url}" alt="Print proof"><i class="cm1"></i><i class="cm2"></i></div>
         <div class="legend"><span><i style="border:2px solid #e6003c"></i>cut line</span><span><i style="border:2px dashed #0096ff"></i>safe zone</span><span><i style="background:rgba(20,20,20,.55)"></i>trimmed off</span><span><i style="background:#ffeb00"></i>too close to the cut</span></div>
         <div class="llm"><span>✦</span><span>${isTypo
-          ? "<b>Every rule passes, but look at the address: “Rotterdma”.</b> Rules can’t read. In Claude, the assistant reviews this proof and catches it."
-          : "Rules check the geometry. In Claude, the assistant also reads this proof for typos, wrong numbers and cut-off logos."}</span></div>
+          ? (aiEnabled ? "<b>Every rule passes.</b> Rules can’t read, so run <b>Proofread with AI</b> and see what it finds."
+                       : "<b>Every rule passes, but look at the address: “Rotterdma”.</b> Rules can’t read. AI proofreading catches it.")
+          : "Rules check the geometry. AI proofreading reads the text: typos, wrong numbers and cut-off logos."}</span></div>
       </div>
       <div class="panel">
         <p class="step">Preflight report</p>
@@ -277,12 +288,46 @@ function render() {
           ${state.fixed?.fixed && ready() ? `<a class="btn" href="${state.fixed.download_url}">Download print-ready PDF</a>` : ""}
           ${state.fixed?.fixed && !ready() ? `<a class="btn ghost" href="${state.fixed.download_url}">Download improved file</a>` : ""}
         </div>
+        ${aiSection()}
         <div class="meta">${esc(rep.file)} · ${esc(rep.artwork.kind)} · ${rep.artwork.effective_dpi ? rep.artwork.effective_dpi + " dpi" : "vector"}</div>
       </div>
     </div>`;
   document.querySelectorAll(".tab").forEach((t) => t.onclick = () => { state.view = t.dataset.v; render(); });
   const btn = $("#fix");
   if (btn) btn.onclick = doFix;
+  const ai = $("#ai");
+  if (ai) ai.onclick = doAI;
+}
+
+function aiNote() {
+  const n = state.ai[state.view]?.checks.length || 0;
+  return n ? ` <b>AI proofreading found ${n} thing${n > 1 ? "s" : ""} to check.</b>` : "";
+}
+
+function aiSection() {
+  if (!aiEnabled) return `<div class="ai hint">✦ AI proofreading is off. Add <code>ANTHROPIC_API_KEY</code> to the <code>.env</code> file to turn it on.</div>`;
+  const res = state.ai[state.view];
+  if (state.aiBusy) return `<div class="ai"><p class="step">AI proofreading</p><div style="display:flex;gap:10px;align-items:center"><span class="spin dark"></span> Reading the artwork…</div></div>`;
+  if (!res) return `<div class="ai"><p class="step">AI proofreading</p>
+    <button class="btn ai-btn" id="ai">✦ Proofread with AI</button>
+    ${state.aiError ? `<p class="err">${esc(state.aiError)}</p>` : `<div class="hint" style="margin-top:8px">Typos, contact details, cut-off logos, readability.</div>`}</div>`;
+  const items = res.checks.length
+    ? `<ul class="checks">${res.checks.map((c) => `
+        <li><span class="ic ${c.severity}">${ICON[c.severity]}</span>
+          <div><b>${esc(c.title)}<span class="ai-badge">AI</span></b><div class="d">${esc(c.detail)}</div>
+          ${c.fix ? `<div class="f">→ ${esc(c.fix)}</div>` : ""}</div></li>`).join("")}</ul>`
+    : `<ul class="checks"><li><span class="ic ok">✓</span><div><b>No text problems found<span class="ai-badge">AI</span></b><div class="d">Spelling, contact details and logos look right.</div></div></li></ul>`;
+  return `<div class="ai"><p class="step">AI proofreading · ${esc(res.model)}</p>${items}
+    ${res.transcript ? `<details><summary>Text the AI read</summary><p>${esc(res.transcript)}</p></details>` : ""}</div>`;
+}
+
+async function doAI() {
+  state.aiBusy = true; state.aiError = null; render();
+  try {
+    state.ai[state.view] = await api("/api/ai-review", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job: state.original.job, product_id: pid(), view: state.view }) });
+  } catch (e) { state.aiError = e.message; }
+  state.aiBusy = false; render();
 }
 
 async function doFix() {
